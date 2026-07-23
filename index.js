@@ -1,90 +1,243 @@
-const express = require('express');
-const axios = require('axios');
-const app = express();
+/**
+ * WhatsApp Bot - Vercel Serverless Function
+ * Integración con Google Gemini API (gemini-2.5-flash)
+ * 
+ * Variables de entorno requeridas:
+ * - GEMINI_API_KEY
+ * - WHATSAPP_VERIFY_TOKEN (para webhook de Meta)
+ * - WHATSAPP_ACCESS_TOKEN (para enviar mensajes vía Graph API)
+ * - WHATSAPP_PHONE_NUMBER_ID (ID del número de WhatsApp Business)
+ */
 
-// Permite que Express lea los datos JSON que envía Meta
-app.use(express.json());
+// ============================================================
+// CONFIGURACIÓN
+// ============================================================
 
-// Tus variables de entorno (configuradas en Vercel/Render)
-const WHATSAPP_TOKEN = process.env.WHATSAPP_TOKEN;
-const VERIFY_TOKEN = process.env.VERIFY_TOKEN;
-// ¡IMPORTANTE! Necesitas el ID de tu número de teléfono de Meta
-const PHONE_NUMBER_ID = process.env.PHONE_NUMBER_ID; 
+const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
+const GEMINI_MODEL = "gemini-2.5-flash";
+const GEMINI_API_URL = `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent?key=${GEMINI_API_KEY}`;
 
-// 1. RUTA GET: Para la verificación inicial de Meta
-app.get('/webhook', (req, res) => {
-    const mode = req.query['hub.mode'];
-    const token = req.query['hub.verify_token'];
-    const challenge = req.query['hub.challenge'];
+const WHATSAPP_VERIFY_TOKEN = process.env.WHATSAPP_VERIFY_TOKEN;
+const WHATSAPP_ACCESS_TOKEN = process.env.WHATSAPP_ACCESS_TOKEN;
+const WHATSAPP_PHONE_NUMBER_ID = process.env.WHATSAPP_PHONE_NUMBER_ID;
+const WHATSAPP_API_URL = `https://graph.facebook.com/v18.0/${WHATSAPP_PHONE_NUMBER_ID}/messages`;
 
-    if (mode && token) {
-        if (mode === 'subscribe' && token === VERIFY_TOKEN) {
-            console.log('¡Webhook verificado por Meta!');
-            res.status(200).send(challenge);
-        } else {
-            res.sendStatus(403);
-        }
+// Reemplazá estos placeholders con tus datos reales
+const TU_NOMBRE = "Lucas";
+const LINK_CALCOM = "https://cal.com/lucasconclaridad/20min";
+const NOMBRE_HUMANO = "Lucas";
+
+// ============================================================
+// SYSTEM PROMPT
+// ============================================================
+
+const SYSTEM_PROMPT = `ROL Y PERSONALIDAD:
+Eres el asistente virtual de ${TU_NOMBRE}. Tu tono es muy cercano, humilde, transparente y uruguayo. Jamás te muestres estructurado ni corporativo. Usás modismos uruguayos de forma natural ("tranqui", "buenazo", "de una", "impecable", "a las órdenes").
+
+OBJETIVO PRINCIPAL:
+Conocer brevemente al usuario (a qué se dedica y motivo de contacto) y entregarle el enlace de Cal.com: ${LINK_CALCOM}.
+
+--------------------------------------------------
+REGLA SUPREMA: DERIVACIÓN A HUMANO
+Si el usuario dice o insinúa que quiere hablar con ${NOMBRE_HUMANO} o con una persona real (ej: "quiero hablar con él", "atendeme vos", "prefiero hablar con una persona", "pásame con tu jefe"):
+1. NO hagas más preguntas ni mandes el link.
+2. Respondé exactamente: "¡De una! Le aviso ya mismo a ${NOMBRE_HUMANO} para que te escriba apenas se libere de la sesión. Aguantame un toque que apenas pueda se pone en contacto contigo."
+3. Si el usuario vuelve a escribir después de esto, solo respondé: "Ya le avisé a ${NOMBRE_HUMANO}, en breve se comunica contigo directamente."
+--------------------------------------------------
+
+MANEJO INTELIGENTE DE INTENCIONES Y RESPUESTAS:
+1. Respuestas cortas o ambiguas ("ok", "dale", "sí", "no sé", "bueno"):
+   - No te trabes. Tomalo como una validación amable, hacé un elogio/comentario corto y pasá al siguiente paso o entregá el link.
+2. Respuestas de rechazo o apuro ("no quiero", "no tengo tiempo", "mandame el link"):
+   - Cero presión. Respondé con humildad: "Tranqui, no te quito tiempo. Te dejo el link a la agenda de ${NOMBRE_HUMANO} por si querés coordinar más adelante: ${LINK_CALCOM}. ¡Que tengas buen día!"
+
+FLUJO CONVERSACIONAL (2 PASOS):
+PASO 1: Inicio + Ocupación
+- Saludo relajado. Aclará que ${NOMBRE_HUMANO} está en una sesión y que vos coordinás la agenda.
+- Pregunta 1: "¿A qué te dedicás o de qué es tu proyecto/estudio?"
+
+PASO 2: Elogiar + Motivo de Contacto
+- Validá amablemente lo que hace.
+- Pregunta 2: "¿Y qué fue lo que te motivó a escribirnos hoy? ¿En qué sentís que te podemos dar una mano principalmente?"
+
+PASO 3: Cierre + Entrega Directa de Link
+- Empatizá brevemente.
+- Entregá el link de Cal.com para agendar la llamada de 20 min.`;
+
+// ============================================================
+// HANDLER PRINCIPAL (Vercel)
+// ============================================================
+
+export default async function handler(req, res) {
+  // CORS básico
+  res.setHeader("Access-Control-Allow-Origin", "*");
+  res.setHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
+  res.setHeader("Access-Control-Allow-Headers", "Content-Type");
+
+  if (req.method === "OPTIONS") {
+    return res.status(200).end();
+  }
+
+  try {
+    if (req.method === "GET") {
+      return handleWebhookVerification(req, res);
     }
-});
 
-// 2. RUTA POST: Para recibir mensajes y responder
-app.post('/webhook', async (req, res) => {
-    // Imprime todo lo que llega en los Logs
-    console.log("📨 ¡Llegó un webhook de Meta!");
-    console.log(JSON.stringify(req.body, null, 2));
-
-    try {
-        // Navegamos por la estructura del mensaje de Meta
-        const body = req.body;
-        
-        // Verificamos si el webhook trae un mensaje de texto real
-        if (
-            body.entry && 
-            body.entry[0].changes && 
-            body.entry[0].changes[0].value.messages && 
-            body.entry[0].changes[0].value.messages[0]
-        ) {
-            const message = body.entry[0].changes[0].value.messages[0];
-            const from = message.from; // El número de quien te escribe
-            
-            // Solo respondemos si es un mensaje de texto
-            if (message.type === 'text') {
-                const msg_body = message.text.body;
-                console.log(`🗣️ Mensaje recibido de ${from}: ${msg_body}`);
-
-                // Enviamos la respuesta automática vía Axios
-                await axios({
-                    method: 'POST',
-                    url: `https://graph.facebook.com/v20.0/${PHONE_NUMBER_ID}/messages`,
-                    headers: {
-                        'Authorization': `Bearer ${WHATSAPP_TOKEN}`,
-                        'Content-Type': 'application/json'
-                    },
-                    data: {
-                        messaging_product: 'whatsapp',
-                        to: from,
-                        text: { body: "¡Hola! Soy tu bot. Recibí tu mensaje: " + msg_body }
-                    }
-                });
-                
-                console.log("✅ Respuesta enviada con éxito.");
-            }
-        }
-        // Siempre hay que responderle a Meta con un 200 OK para que sepa que lo recibimos
-        res.sendStatus(200);
-    } catch (error) {
-        console.error("❌ Error al procesar el mensaje:", error.response ? error.response.data : error.message);
-        res.sendStatus(200); // Igual enviamos 200 para que Meta no reintente infinitamente
+    if (req.method === "POST") {
+      return handleIncomingMessage(req, res);
     }
-});
 
-// Iniciamos el servidor LOCAL (Si no estamos en Vercel)
-if (process.env.NODE_ENV !== 'production') {
-    const PORT = process.env.PORT || 3000;
-    app.listen(PORT, () => {
-        console.log(`🚀 Servidor corriendo en el puerto ${PORT}`);
-    });
+    return res.status(405).json({ error: "Método no permitido" });
+  } catch (error) {
+    console.error("[ERROR] Handler principal:", error);
+    return res.status(500).json({ error: "Error interno del servidor" });
+  }
 }
 
-// EXPORTAMOS LA APP (Esto es lo que hace que funcione en Vercel)
-module.exports = app;
+// ============================================================
+// VERIFICACIÓN DE WEBHOOK (Meta)
+// ============================================================
+
+function handleWebhookVerification(req, res) {
+  const mode = req.query["hub.mode"];
+  const token = req.query["hub.verify_token"];
+  const challenge = req.query["hub.challenge"];
+
+  console.log("[WEBHOOK] Verificación recibida:", { mode, token });
+
+  if (mode === "subscribe" && token === WHATSAPP_VERIFY_TOKEN) {
+    console.log("[WEBHOOK] Verificación exitosa.");
+    return res.status(200).send(challenge);
+  }
+
+  console.warn("[WEBHOOK] Verificación fallida. Token inválido.");
+  return res.status(403).json({ error: "Verificación fallida" });
+}
+
+// ============================================================
+// PROCESAMIENTO DE MENSAJES ENTRANTES
+// ============================================================
+
+async function handleIncomingMessage(req, res) {
+  const body = req.body;
+
+  if (body.object !== "whatsapp_business_account") {
+    return res.status(404).json({ error: "No es un evento de WhatsApp" });
+  }
+
+  const entries = body.entry || [];
+
+  for (const entry of entries) {
+    const changes = entry.changes || [];
+
+    for (const change of changes) {
+      const value = change.value || {};
+      const messages = value.messages || [];
+
+      for (const message of messages) {
+        if (message.type === "text") {
+          const from = message.from;
+          const text = message.text?.body || "";
+
+          console.log(`[MSG] De ${from}: "${text}"`);
+
+          try {
+            const reply = await getGeminiResponse(text);
+            await sendWhatsAppMessage(from, reply);
+          } catch (err) {
+            console.error("[ERROR] Procesando mensaje:", err);
+          }
+        }
+      }
+    }
+  }
+
+  // Siempre respondé 200 a Meta para evitar reintentos
+  return res.status(200).json({ status: "ok" });
+}
+
+// ============================================================
+// CONSULTA A GOOGLE GEMINI
+// ============================================================
+
+async function getGeminiResponse(userMessage) {
+  if (!GEMINI_API_KEY) {
+    throw new Error("GEMINI_API_KEY no está configurada");
+  }
+
+  const payload = {
+    systemInstruction: {
+      parts: [{ text: SYSTEM_PROMPT }]
+    },
+    contents: [
+      {
+        role: "user",
+        parts: [{ text: userMessage }]
+      }
+    ],
+    generationConfig: {
+      temperature: 0.7,
+      maxOutputTokens: 800,
+      topP: 0.95,
+      topK: 40
+    }
+  };
+
+  const response = await fetch(GEMINI_API_URL, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload)
+  });
+
+  if (!response.ok) {
+    const errorText = await response.text();
+    throw new Error(`Gemini API error ${response.status}: ${errorText}`);
+  }
+
+  const data = await response.json();
+
+  const reply =
+    data.candidates?.[0]?.content?.parts?.[0]?.text ||
+    "Perdón, me quedé en blanco. ¿Me repetís eso?";
+
+  console.log(`[GEMINI] Respuesta: "${reply.substring(0, 100)}..."`);
+
+  return reply.trim();
+}
+
+// ============================================================
+// ENVÍO DE MENSAJES DE WHATSAPP (Graph API)
+// ============================================================
+
+async function sendWhatsAppMessage(to, text) {
+  if (!WHATSAPP_ACCESS_TOKEN || !WHATSAPP_PHONE_NUMBER_ID) {
+    throw new Error("Faltan credenciales de WhatsApp Business API");
+  }
+
+  const payload = {
+    messaging_product: "whatsapp",
+    recipient_type: "individual",
+    to: to,
+    type: "text",
+    text: { body: text }
+  };
+
+  const response = await fetch(WHATSAPP_API_URL, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${WHATSAPP_ACCESS_TOKEN}`
+    },
+    body: JSON.stringify(payload)
+  });
+
+  if (!response.ok) {
+    const errorText = await response.text();
+    throw new Error(`WhatsApp API error ${response.status}: ${errorText}`);
+  }
+
+  const data = await response.json();
+  console.log(`[WHATSAPP] Mensaje enviado a ${to}:`, data.messages?.[0]?.id);
+
+  return data;
+}
