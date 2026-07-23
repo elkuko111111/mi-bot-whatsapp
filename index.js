@@ -5,7 +5,7 @@ const app = express();
 // Permite que Express lea los datos JSON que envía Meta
 app.use(express.json());
 
-// Tus variables de entorno (configuradas en Render)
+// Tus variables de entorno (configuradas en Vercel/Render)
 const WHATSAPP_TOKEN = process.env.WHATSAPP_TOKEN;
 const VERIFY_TOKEN = process.env.VERIFY_TOKEN;
 // ¡IMPORTANTE! Necesitas el ID de tu número de teléfono de Meta
@@ -29,7 +29,7 @@ app.get('/webhook', (req, res) => {
 
 // 2. RUTA POST: Para recibir mensajes y responder
 app.post('/webhook', async (req, res) => {
-    // Imprime todo lo que llega en los Logs de Render
+    // Imprime todo lo que llega en los Logs
     console.log("📨 ¡Llegó un webhook de Meta!");
     console.log(JSON.stringify(req.body, null, 2));
 
@@ -78,8 +78,13 @@ app.post('/webhook', async (req, res) => {
     }
 });
 
-// Iniciamos el servidor
-const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => {
-    console.log(`🚀 Servidor corriendo en el puerto ${PORT}`);
-});
+// Iniciamos el servidor LOCAL (Si no estamos en Vercel)
+if (process.env.NODE_ENV !== 'production') {
+    const PORT = process.env.PORT || 3000;
+    app.listen(PORT, () => {
+        console.log(`🚀 Servidor corriendo en el puerto ${PORT}`);
+    });
+}
+
+// EXPORTAMOS LA APP (Esto es lo que hace que funcione en Vercel)
+module.exports = app;
