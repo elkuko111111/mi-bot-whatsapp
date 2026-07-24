@@ -21,10 +21,7 @@ const NOMBRE_HUMANO = "Lucas";
 // MEMORIA DE CONVERSACIÓN (en producción usar Redis/Vercel KV)
 // ============================================================
 
-// Mapa en memoria: número de teléfono -> array de mensajes
 const conversations = new Map();
-
-// Límite de mensajes guardados por conversación (para no saturar la API)
 const MAX_HISTORY = 10;
 
 function getConversation(phone) {
@@ -37,8 +34,6 @@ function getConversation(phone) {
 function addToConversation(phone, role, text) {
   const history = getConversation(phone);
   history.push({ role, text, timestamp: Date.now() });
-  
-  // Mantener solo los últimos mensajes
   if (history.length > MAX_HISTORY) {
     history.shift();
   }
@@ -55,7 +50,7 @@ function clearConversation(phone) {
 const SYSTEM_PROMPT = `Sos el asistente virtual de ${NOMBRE_HUMANO}. Tonada uruguaya natural: "tranqui", "buenazo", "de una", "impecable", "a las órdenes". NUNCA corporativo ni robótico.
 
 REGLAS DE ORO:
-1. RESPUESTAS CORTAS: máximo 2-3 oraciones por mensaje. Si el usuario escribe poco, vos también.
+1. RESPUESTAS CORTAS: máximo 2-3 oraciones cortas. Si el usuario escribe poco, vos también. NUNCA escribas párrafos largos.
 2. MEMORIA: recordá lo que ya te dijo el usuario. NO repreguntar lo mismo.
 3. NO seas insistente: si el usuario ya te dijo su ocupación o motivo, NO lo vuelvas a preguntar.
 4. Flujo flexible: solo necesitás saber a qué se dedica y por qué escribió. Si ya lo sabés, pasá directo al link.
@@ -178,14 +173,9 @@ async function getGeminiResponse(phone, promptUsuario) {
     throw new Error("GEMINI_API_KEY no está configurada");
   }
 
-  // Agregar mensaje del usuario al historial
   addToConversation(phone, "user", promptUsuario);
-
-  // Construir el historial de contenidos para Gemini
   const history = getConversation(phone);
   
-  // El system prompt va aparte en systemInstruction
-  // Los contents son el historial de la conversación
   const contents = history.map(msg => ({
     role: msg.role,
     parts: [{ text: msg.text }]
@@ -204,8 +194,8 @@ async function getGeminiResponse(phone, promptUsuario) {
       },
       contents: contents,
       generationConfig: {
-        temperature: 0.6,        // Un poco más bajo para seguir reglas
-        maxOutputTokens: 300,    // MUCHO más bajo para forzar brevedad
+        temperature: 0.6,
+        maxOutputTokens: 800,    // ← VOLVIÓ A 800: límite generoso, brevedad por prompt
         topP: 0.9,
         topK: 40
       }
@@ -223,7 +213,6 @@ async function getGeminiResponse(phone, promptUsuario) {
     data.candidates?.[0]?.content?.parts?.[0]?.text ||
     "Perdón, me quedé en blanco. ¿Me repetís eso?";
 
-  // Agregar respuesta del asistente al historial
   addToConversation(phone, "model", reply.trim());
 
   console.log(`[GEMINI] Respuesta: "${reply.substring(0, 120)}..."`);
