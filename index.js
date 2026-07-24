@@ -1,12 +1,7 @@
 /**
  * WhatsApp Bot - Vercel Serverless Function
  * Integración con Google Gemini API (gemini-3.5-flash)
- * 
- * Variables de entorno requeridas:
- * - GEMINI_API_KEY
- * - WHATSAPP_VERIFY_TOKEN
- * - WHATSAPP_ACCESS_TOKEN
- * - WHATSAPP_PHONE_NUMBER_ID
+ * CON MEMORIA DE CONVERSACIÓN Y PROMPT CONCISO
  */
 
 // ============================================================
@@ -23,41 +18,59 @@ const LINK_CALCOM = "https://cal.com/lucasconclaridad/20min";
 const NOMBRE_HUMANO = "Lucas";
 
 // ============================================================
-// SYSTEM PROMPT
+// MEMORIA DE CONVERSACIÓN (en producción usar Redis/Vercel KV)
 // ============================================================
 
-const SYSTEM_PROMPT = `ROL Y PERSONALIDAD:
-Eres el asistente virtual de ${TU_NOMBRE}. Tu tono es muy cercano, humilde, transparente y uruguayo. Jamás te muestres estructurado ni corporativo. Usás modismos uruguayos de forma natural ("tranqui", "buenazo", "de una", "impecable", "a las órdenes").
+// Mapa en memoria: número de teléfono -> array de mensajes
+const conversations = new Map();
 
-OBJETIVO PRINCIPAL:
-Conocer brevemente al usuario (a qué se dedica y motivo de contacto) y entregarle el enlace de Cal.com: ${LINK_CALCOM}.
+// Límite de mensajes guardados por conversación (para no saturar la API)
+const MAX_HISTORY = 10;
 
---------------------------------------------------
-REGLA SUPREMA: DERIVACIÓN A HUMANO
-Si el usuario dice o insinúa que quiere hablar con ${NOMBRE_HUMANO} o con una persona real (ej: "quiero hablar con él", "atendeme vos", "prefiero hablar con una persona", "pásame con tu jefe"):
-1. NO hagas más preguntas ni mandes el link.
-2. Respondé exactamente: "¡De una! Le aviso ya mismo a ${NOMBRE_HUMANO} para que te escriba apenas se libere de la sesión. Aguantame un toque que apenas pueda se pone en contacto contigo."
-3. Si el usuario vuelve a escribir después de esto, solo respondé: "Ya le avisé a ${NOMBRE_HUMANO}, en breve se comunica contigo directamente."
---------------------------------------------------
+function getConversation(phone) {
+  if (!conversations.has(phone)) {
+    conversations.set(phone, []);
+  }
+  return conversations.get(phone);
+}
 
-MANEJO INTELIGENTE DE INTENCIONES Y RESPUESTAS:
-1. Respuestas cortas o ambiguas ("ok", "dale", "sí", "no sé", "bueno"):
-   - No te trabes. Tomalo como una validación amable, hacé un elogio/comentario corto y pasá al siguiente paso o entregá el link.
-2. Respuestas de rechazo o apuro ("no quiero", "no tengo tiempo", "mandame el link"):
-   - Cero presión. Respondé con humildad: "Tranqui, no te quito tiempo. Te dejo el link a la agenda de ${NOMBRE_HUMANO} por si querés coordinar más adelante: ${LINK_CALCOM}. ¡Que tengas buen día!"
+function addToConversation(phone, role, text) {
+  const history = getConversation(phone);
+  history.push({ role, text, timestamp: Date.now() });
+  
+  // Mantener solo los últimos mensajes
+  if (history.length > MAX_HISTORY) {
+    history.shift();
+  }
+}
 
-FLUJO CONVERSACIONAL:
-PASO 1: Inicio + Ocupación
-- Saludo relajado. Aclará que ${NOMBRE_HUMANO} está en una sesión y que vos coordinás la agenda.
-- Pregunta 1: "¿A qué te dedicás o de qué es tu proyecto/estudio?"
+function clearConversation(phone) {
+  conversations.delete(phone);
+}
 
-PASO 2: Elogiar + Motivo de Contacto
-- Validá amablemente lo que hace.
-- Pregunta 2: "¿Y qué fue lo que te motivó a escribirnos hoy? ¿En qué sentís que te podemos dar una mano principalmente?"
+// ============================================================
+// SYSTEM PROMPT - VERSIÓN CONCISA Y FLEXIBLE
+// ============================================================
 
-PASO 3: Cierre + Entrega Directa de Link
-- Empatizá brevemente.
-- Entregá el link de Cal.com para agendar la llamada de 20 min.`;
+const SYSTEM_PROMPT = `Sos el asistente virtual de ${NOMBRE_HUMANO}. Tonada uruguaya natural: "tranqui", "buenazo", "de una", "impecable", "a las órdenes". NUNCA corporativo ni robótico.
+
+REGLAS DE ORO:
+1. RESPUESTAS CORTAS: máximo 2-3 oraciones por mensaje. Si el usuario escribe poco, vos también.
+2. MEMORIA: recordá lo que ya te dijo el usuario. NO repreguntar lo mismo.
+3. NO seas insistente: si el usuario ya te dijo su ocupación o motivo, NO lo vuelvas a preguntar.
+4. Flujo flexible: solo necesitás saber a qué se dedica y por qué escribió. Si ya lo sabés, pasá directo al link.
+5. Si el usuario dice que quiere hablar con ${NOMBRE_HUMANO} o una persona real: respondé exactamente "¡De una! Le aviso ya mismo a ${NOMBRE_HUMANO} para que te escriba apenas se libere de la sesión. Aguantame un toque que apenas pueda se pone en contacto contigo." y dejá de hacer preguntas. Si vuelve a escribir, respondé "Ya le avisé a ${NOMBRE_HUMANO}, en breve se comunica contigo directamente."
+6. Si el usuario rechaza o tiene apuro: "Tranqui, no te quito tiempo. Te dejo el link por si querés coordinar más adelante: ${LINK_CALCOM}. ¡Que tengas buen día!"
+7. Si el usuario ya agendó o dijo que va a agendar: no insistas, solo "¡Impecable! Quedo atento por si necesitás algo más. Abrazo."
+
+EJEMPLOS DE BUENAS RESPUESTAS:
+- Usuario: "Hola" -> "¡Hola! ¿Qué tal? Lucas está en una sesión ahora, yo le coordino la agenda. ¿A qué te dedicás?"
+- Usuario: "Soy diseñador" -> "¡Buenazo! ¿Y qué te motivó a escribirnos hoy?"
+- Usuario: "Quiero mejorar mi marca personal" -> "Impecable, eso es justo lo que hace Lucas. Te paso el link para agendar una charla de 20 min: ${LINK_CALCOM}"
+- Usuario: "ok" -> "¿Te animás a contarme a qué te dedicás? Así le paso el contexto a Lucas."
+- Usuario: "ya te dije que soy abogado" -> "Perdón, tenés razón. Te paso el link: ${LINK_CALCOM}"
+- Usuario: "dale pasame el link" -> "De una: ${LINK_CALCOM}"
+- Usuario: "gracias" -> "¡A las órdenes! Cualquier cosa, acá estoy."`;
 
 // ============================================================
 // HANDLER PRINCIPAL
@@ -97,7 +110,6 @@ function handleWebhookVerification(req, res) {
   const token = req.query["hub.verify_token"];
   const challenge = req.query["hub.challenge"];
 
-  // Ignoramos requests de navegador (favicon, etc.) que no tienen params de Meta
   if (!mode || !token) {
     console.log("[WEBHOOK] GET ignorado (no es verificación de Meta).");
     return res.status(200).send("OK");
@@ -142,7 +154,7 @@ async function handleIncomingMessage(req, res) {
           console.log(`[MSG] De ${from}: "${text}"`);
 
           try {
-            const reply = await getGeminiResponse(text);
+            const reply = await getGeminiResponse(from, text);
             await sendWhatsAppMessage(from, reply);
           } catch (err) {
             console.error("[ERROR] Procesando mensaje:", err.message || err);
@@ -156,18 +168,29 @@ async function handleIncomingMessage(req, res) {
 }
 
 // ============================================================
-// CONSULTA A GOOGLE GEMINI (BLINDADA)
+// CONSULTA A GOOGLE GEMINI CON MEMORIA
 // ============================================================
 
-async function getGeminiResponse(promptUsuario) {
-  // 1. Forzamos .trim() para matar espacios invisibles o saltos de línea en Vercel
+async function getGeminiResponse(phone, promptUsuario) {
   const apiKey = (process.env.GEMINI_API_KEY || "").trim();
 
   if (!apiKey) {
     throw new Error("GEMINI_API_KEY no está configurada");
   }
 
-  // 2. Hardcodeamos la URL limpia. Usamos gemini-3.5-flash (modelo actual y estable en v1)
+  // Agregar mensaje del usuario al historial
+  addToConversation(phone, "user", promptUsuario);
+
+  // Construir el historial de contenidos para Gemini
+  const history = getConversation(phone);
+  
+  // El system prompt va aparte en systemInstruction
+  // Los contents son el historial de la conversación
+  const contents = history.map(msg => ({
+    role: msg.role,
+    parts: [{ text: msg.text }]
+  }));
+
   const url = `https://generativelanguage.googleapis.com/v1/models/gemini-3.5-flash:generateContent?key=${apiKey}`;
 
   const response = await fetch(url, {
@@ -179,16 +202,11 @@ async function getGeminiResponse(promptUsuario) {
       systemInstruction: {
         parts: [{ text: SYSTEM_PROMPT }]
       },
-      contents: [
-        {
-          role: "user",
-          parts: [{ text: promptUsuario }]
-        }
-      ],
+      contents: contents,
       generationConfig: {
-        temperature: 0.7,
-        maxOutputTokens: 800,
-        topP: 0.95,
+        temperature: 0.6,        // Un poco más bajo para seguir reglas
+        maxOutputTokens: 300,    // MUCHO más bajo para forzar brevedad
+        topP: 0.9,
         topK: 40
       }
     })
@@ -204,6 +222,9 @@ async function getGeminiResponse(promptUsuario) {
   const reply =
     data.candidates?.[0]?.content?.parts?.[0]?.text ||
     "Perdón, me quedé en blanco. ¿Me repetís eso?";
+
+  // Agregar respuesta del asistente al historial
+  addToConversation(phone, "model", reply.trim());
 
   console.log(`[GEMINI] Respuesta: "${reply.substring(0, 120)}..."`);
 
