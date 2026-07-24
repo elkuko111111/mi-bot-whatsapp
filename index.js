@@ -1,7 +1,7 @@
 /**
  * WhatsApp Bot - Vercel Serverless Function
  * Integración con Google Gemini API (gemini-3.5-flash)
- * CON MEMORIA DE CONVERSACIÓN Y PROMPT CONCISO
+ * CON MEMORIA, PROMPT CONCISO Y MANEJO DE ERRORES 503
  */
 
 // ============================================================
@@ -18,7 +18,7 @@ const LINK_CALCOM = "https://cal.com/lucasconclaridad/20min";
 const NOMBRE_HUMANO = "Lucas";
 
 // ============================================================
-// MEMORIA DE CONVERSACIÓN (en producción usar Redis/Vercel KV)
+// MEMORIA DE CONVERSACIÓN
 // ============================================================
 
 const conversations = new Map();
@@ -39,18 +39,14 @@ function addToConversation(phone, role, text) {
   }
 }
 
-function clearConversation(phone) {
-  conversations.delete(phone);
-}
-
 // ============================================================
-// SYSTEM PROMPT - VERSIÓN CONCISA Y FLEXIBLE
+// SYSTEM PROMPT
 // ============================================================
 
 const SYSTEM_PROMPT = `Sos el asistente virtual de ${NOMBRE_HUMANO}. Tonada uruguaya natural: "tranqui", "buenazo", "de una", "impecable", "a las órdenes". NUNCA corporativo ni robótico.
 
 REGLAS DE ORO:
-1. RESPUESTAS CORTAS: máximo 2-3 oraciones cortas. Si el usuario escribe poco, vos también. NUNCA escribas párrafos largos.
+1. RESPUESTAS CORTAS: máximo 2-3 oraciones cortas. NUNCA escribas párrafos largos.
 2. MEMORIA: recordá lo que ya te dijo el usuario. NO repreguntar lo mismo.
 3. NO seas insistente: si el usuario ya te dijo su ocupación o motivo, NO lo vuelvas a preguntar.
 4. Flujo flexible: solo necesitás saber a qué se dedica y por qué escribió. Si ya lo sabés, pasá directo al link.
@@ -58,10 +54,10 @@ REGLAS DE ORO:
 6. Si el usuario rechaza o tiene apuro: "Tranqui, no te quito tiempo. Te dejo el link por si querés coordinar más adelante: ${LINK_CALCOM}. ¡Que tengas buen día!"
 7. Si el usuario ya agendó o dijo que va a agendar: no insistas, solo "¡Impecable! Quedo atento por si necesitás algo más. Abrazo."
 
-EJEMPLOS DE BUENAS RESPUESTAS:
+EJEMPLOS:
 - Usuario: "Hola" -> "¡Hola! ¿Qué tal? Lucas está en una sesión ahora, yo le coordino la agenda. ¿A qué te dedicás?"
 - Usuario: "Soy diseñador" -> "¡Buenazo! ¿Y qué te motivó a escribirnos hoy?"
-- Usuario: "Quiero mejorar mi marca personal" -> "Impecable, eso es justo lo que hace Lucas. Te paso el link para agendar una charla de 20 min: ${LINK_CALCOM}"
+- Usuario: "Quiero mejorar mi marca personal" -> "Impecable. Te paso el link para agendar una charla de 20 min: ${LINK_CALCOM}"
 - Usuario: "ok" -> "¿Te animás a contarme a qué te dedicás? Así le paso el contexto a Lucas."
 - Usuario: "ya te dije que soy abogado" -> "Perdón, tenés razón. Te paso el link: ${LINK_CALCOM}"
 - Usuario: "dale pasame el link" -> "De una: ${LINK_CALCOM}"
@@ -97,7 +93,7 @@ export default async function handler(req, res) {
 }
 
 // ============================================================
-// VERIFICACIÓN DE WEBHOOK (Meta)
+// VERIFICACIÓN DE WEBHOOK
 // ============================================================
 
 function handleWebhookVerification(req, res) {
@@ -149,10 +145,23 @@ async function handleIncomingMessage(req, res) {
           console.log(`[MSG] De ${from}: "${text}"`);
 
           try {
-            const reply = await getGeminiResponse(from, text);
+            // 1. Avisar al usuario que estamos procesando (opcional pero recomendado)
+            // await sendWhatsAppMessage(from, "Un segundo que me pongo las pilas... 🧠");
+
+            const reply = await getGeminiResponseWithRetry(from, text);
             await sendWhatsAppMessage(from, reply);
           } catch (err) {
             console.error("[ERROR] Procesando mensaje:", err.message || err);
+            
+            // Si todo falló, al menos avisarle al usuario que no lo ignoraron
+            try {
+              await sendWhatsAppMessage(
+                from,
+                "Perdón, estoy teniendo un problemita técnico ahora. ¿Me repetís lo que necesitás? O si querés hablar directo con Lucas, acá tenés el link: " + LINK_CALCOM
+              );
+            } catch (sendErr) {
+              console.error("[ERROR] Falló también el mensaje de fallback:", sendErr.message);
+            }
           }
         }
       }
@@ -160,6 +169,38 @@ async function handleIncomingMessage(req, res) {
   }
 
   return res.status(200).json({ status: "ok" });
+}
+
+// ============================================================
+// CONSULTA A GEMINI CON REINTENTOS (BACKOFF EXPONENCIAL)
+// ============================================================
+
+async function getGeminiResponseWithRetry(phone, promptUsuario, attempt = 1) {
+  const MAX_RETRIES = 3;
+  const BASE_DELAY_MS = 2000; // 2 segundos base
+
+  try {
+    return await getGeminiResponse(phone, promptUsuario);
+  } catch (err) {
+    const isRetryable = err.message?.includes("503") || 
+                        err.message?.includes("429") || 
+                        err.message?.includes("UNAVAILABLE") ||
+                        err.message?.includes("RATE_LIMIT_EXCEEDED");
+
+    if (isRetryable && attempt < MAX_RETRIES) {
+      const delay = BASE_DELAY_MS * Math.pow(2, attempt - 1); // 2s, 4s, 8s
+      console.log(`[RETRY] Intento ${attempt}/${MAX_RETRIES} falló. Esperando ${delay}ms...`);
+      await sleep(delay);
+      return getGeminiResponseWithRetry(phone, promptUsuario, attempt + 1);
+    }
+
+    // Si no es reintentable o se acabaron los intentos, propagar el error
+    throw err;
+  }
+}
+
+function sleep(ms) {
+  return new Promise(resolve => setTimeout(resolve, ms));
 }
 
 // ============================================================
@@ -195,7 +236,7 @@ async function getGeminiResponse(phone, promptUsuario) {
       contents: contents,
       generationConfig: {
         temperature: 0.6,
-        maxOutputTokens: 800,    // ← VOLVIÓ A 800: límite generoso, brevedad por prompt
+        maxOutputTokens: 800,
         topP: 0.9,
         topK: 40
       }
