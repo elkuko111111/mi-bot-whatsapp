@@ -1,28 +1,23 @@
 /**
  * WhatsApp Bot - Vercel Serverless Function
- * Integración con Google Gemini API (gemini-2.5-flash)
+ * Integración con Google Gemini API (gemini-1.5-flash)
  * 
  * Variables de entorno requeridas:
  * - GEMINI_API_KEY
- * - WHATSAPP_VERIFY_TOKEN (para webhook de Meta)
- * - WHATSAPP_ACCESS_TOKEN (para enviar mensajes vía Graph API)
- * - WHATSAPP_PHONE_NUMBER_ID (ID del número de WhatsApp Business)
+ * - WHATSAPP_VERIFY_TOKEN
+ * - WHATSAPP_ACCESS_TOKEN
+ * - WHATSAPP_PHONE_NUMBER_ID
  */
 
 // ============================================================
 // CONFIGURACIÓN
 // ============================================================
 
-const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
-const GEMINI_MODEL = "gemini-2.0-flash";
-const GEMINI_API_URL = `https://generativelanguage.googleapis.com/v1/models/${GEMINI_MODEL}:generateContent?key=${GEMINI_API_KEY}`;
-
 const WHATSAPP_VERIFY_TOKEN = process.env.WHATSAPP_VERIFY_TOKEN;
 const WHATSAPP_ACCESS_TOKEN = process.env.WHATSAPP_ACCESS_TOKEN;
 const WHATSAPP_PHONE_NUMBER_ID = process.env.WHATSAPP_PHONE_NUMBER_ID;
 const WHATSAPP_API_URL = `https://graph.facebook.com/v18.0/${WHATSAPP_PHONE_NUMBER_ID}/messages`;
 
-// Reemplazá estos placeholders con tus datos reales
 const TU_NOMBRE = "Lucas";
 const LINK_CALCOM = "https://cal.com/lucasconclaridad/20min";
 const NOMBRE_HUMANO = "Lucas";
@@ -51,7 +46,7 @@ MANEJO INTELIGENTE DE INTENCIONES Y RESPUESTAS:
 2. Respuestas de rechazo o apuro ("no quiero", "no tengo tiempo", "mandame el link"):
    - Cero presión. Respondé con humildad: "Tranqui, no te quito tiempo. Te dejo el link a la agenda de ${NOMBRE_HUMANO} por si querés coordinar más adelante: ${LINK_CALCOM}. ¡Que tengas buen día!"
 
-FLUJO CONVERSACIONAL (2 PASOS):
+FLUJO CONVERSACIONAL:
 PASO 1: Inicio + Ocupación
 - Saludo relajado. Aclará que ${NOMBRE_HUMANO} está en una sesión y que vos coordinás la agenda.
 - Pregunta 1: "¿A qué te dedicás o de qué es tu proyecto/estudio?"
@@ -65,11 +60,10 @@ PASO 3: Cierre + Entrega Directa de Link
 - Entregá el link de Cal.com para agendar la llamada de 20 min.`;
 
 // ============================================================
-// HANDLER PRINCIPAL (Vercel)
+// HANDLER PRINCIPAL
 // ============================================================
 
 export default async function handler(req, res) {
-  // CORS básico
   res.setHeader("Access-Control-Allow-Origin", "*");
   res.setHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
   res.setHeader("Access-Control-Allow-Headers", "Content-Type");
@@ -102,6 +96,12 @@ function handleWebhookVerification(req, res) {
   const mode = req.query["hub.mode"];
   const token = req.query["hub.verify_token"];
   const challenge = req.query["hub.challenge"];
+
+  // Ignoramos requests de navegador (favicon, etc.) que no tienen params de Meta
+  if (!mode || !token) {
+    console.log("[WEBHOOK] GET ignorado (no es verificación de Meta).");
+    return res.status(200).send("OK");
+  }
 
   console.log("[WEBHOOK] Verificación recibida:", { mode, token });
 
@@ -145,53 +145,58 @@ async function handleIncomingMessage(req, res) {
             const reply = await getGeminiResponse(text);
             await sendWhatsAppMessage(from, reply);
           } catch (err) {
-            console.error("[ERROR] Procesando mensaje:", err);
+            console.error("[ERROR] Procesando mensaje:", err.message || err);
           }
         }
       }
     }
   }
 
-  // Siempre respondé 200 a Meta para evitar reintentos
   return res.status(200).json({ status: "ok" });
 }
 
 // ============================================================
-// CONSULTA A GOOGLE GEMINI
+// CONSULTA A GOOGLE GEMINI (BLINDADA)
 // ============================================================
 
-async function getGeminiResponse(userMessage) {
-  if (!GEMINI_API_KEY) {
+async function getGeminiResponse(promptUsuario) {
+  // 1. Forzamos .trim() para matar espacios invisibles o saltos de línea en Vercel
+  const apiKey = (process.env.GEMINI_API_KEY || "").trim();
+
+  if (!apiKey) {
     throw new Error("GEMINI_API_KEY no está configurada");
   }
 
-  const payload = {
-    systemInstruction: {
-      parts: [{ text: SYSTEM_PROMPT }]
-    },
-    contents: [
-      {
-        role: "user",
-        parts: [{ text: userMessage }]
-      }
-    ],
-    generationConfig: {
-      temperature: 0.7,
-      maxOutputTokens: 800,
-      topP: 0.95,
-      topK: 40
-    }
-  };
+  // 2. Hardcodeamos la URL limpia. Usamos gemini-1.5-flash (estable y con cuota gratuita)
+  const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${apiKey}`;
 
-  const response = await fetch(GEMINI_API_URL, {
+  const response = await fetch(url, {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(payload)
+    headers: {
+      "Content-Type": "application/json"
+    },
+    body: JSON.stringify({
+      systemInstruction: {
+        parts: [{ text: SYSTEM_PROMPT }]
+      },
+      contents: [
+        {
+          role: "user",
+          parts: [{ text: promptUsuario }]
+        }
+      ],
+      generationConfig: {
+        temperature: 0.7,
+        maxOutputTokens: 800,
+        topP: 0.95,
+        topK: 40
+      }
+    })
   });
 
   if (!response.ok) {
-    const errorText = await response.text();
-    throw new Error(`Gemini API error ${response.status}: ${errorText}`);
+    const errorDetails = await response.text();
+    throw new Error(`API Falló con status ${response.status}: ${errorDetails}`);
   }
 
   const data = await response.json();
@@ -200,13 +205,13 @@ async function getGeminiResponse(userMessage) {
     data.candidates?.[0]?.content?.parts?.[0]?.text ||
     "Perdón, me quedé en blanco. ¿Me repetís eso?";
 
-  console.log(`[GEMINI] Respuesta: "${reply.substring(0, 100)}..."`);
+  console.log(`[GEMINI] Respuesta: "${reply.substring(0, 120)}..."`);
 
   return reply.trim();
 }
 
 // ============================================================
-// ENVÍO DE MENSAJES DE WHATSAPP (Graph API)
+// ENVÍO DE MENSAJES DE WHATSAPP
 // ============================================================
 
 async function sendWhatsAppMessage(to, text) {
