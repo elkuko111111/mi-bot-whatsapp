@@ -157,7 +157,7 @@ async function handleIncomingMessage(req, res) {
             try {
               await sendWhatsAppMessage(
                 from,
-                "Perdón, estoy teniendo un problemita técnico ahora. ¿Me repetís lo que necesitás? O si querés hablar directo con Lucas, acá tenés el link: " + LINK_CALCOM
+                "Perdón, estoy teniendo un problemita técnico ahora. ¿Me repetís lo que necesitás? O si querés agendarte con Lucas para una entrevista, acá tenés el link: " + LINK_CALCOM
               );
             } catch (sendErr) {
               console.error("[ERROR] Falló también el mensaje de fallback:", sendErr.message);
