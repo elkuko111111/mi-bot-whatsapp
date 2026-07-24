@@ -1,10 +1,6 @@
 {
   "name": "whatsapp-bot",
   "version": "1.0.0",
-  "description": "Bot de WhatsApp con Meta API y Gemini",
-  "main": "index.js",
-  "type": "module",
-  "scripts": {
-    "start": "node index.js"
-  }
+  "description": "Bot de WhatsApp con Gemini y Meta API",
+  "main": "index.js"
 }
