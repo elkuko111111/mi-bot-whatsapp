@@ -1,6 +1,6 @@
 /**
  * WhatsApp Bot - Vercel Serverless Function
- * Integración con Google Gemini API (gemini-1.5-flash)
+ * Integración con Google Gemini API (gemini-3.5-flash)
  * 
  * Variables de entorno requeridas:
  * - GEMINI_API_KEY
@@ -167,8 +167,8 @@ async function getGeminiResponse(promptUsuario) {
     throw new Error("GEMINI_API_KEY no está configurada");
   }
 
-  // 2. Hardcodeamos la URL limpia. Usamos gemini-1.5-flash (estable y con cuota gratuita)
-  const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${apiKey}`;
+  // 2. Hardcodeamos la URL limpia. Usamos gemini-3.5-flash (modelo actual y estable en v1)
+  const url = `https://generativelanguage.googleapis.com/v1/models/gemini-3.5-flash:generateContent?key=${apiKey}`;
 
   const response = await fetch(url, {
     method: "POST",
