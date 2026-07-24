@@ -1,7 +1,7 @@
 /**
  * WhatsApp Bot - Vercel Serverless Function
- * Integración con Google Gemini API (gemini-3.5-flash)
- * CON MEMORIA, PROMPT CONCISO Y MANEJO DE ERRORES 503
+ * Integración con Groq API (Llama 3.1 8B / 3.3 70B)
+ * 100% gratis con rate limits generosos
  */
 
 // ============================================================
@@ -12,6 +12,9 @@ const WHATSAPP_VERIFY_TOKEN = process.env.WHATSAPP_VERIFY_TOKEN;
 const WHATSAPP_ACCESS_TOKEN = process.env.WHATSAPP_ACCESS_TOKEN;
 const WHATSAPP_PHONE_NUMBER_ID = process.env.WHATSAPP_PHONE_NUMBER_ID;
 const WHATSAPP_API_URL = `https://graph.facebook.com/v18.0/${WHATSAPP_PHONE_NUMBER_ID}/messages`;
+
+const GROQ_API_KEY = process.env.GROQ_API_KEY;
+const GROQ_API_URL = "https://api.groq.com/openai/v1/chat/completions";
 
 const TU_NOMBRE = "Lucas";
 const LINK_CALCOM = "https://cal.com/lucasconclaridad/20min";
@@ -145,15 +148,12 @@ async function handleIncomingMessage(req, res) {
           console.log(`[MSG] De ${from}: "${text}"`);
 
           try {
-            // 1. Avisar al usuario que estamos procesando (opcional pero recomendado)
-            // await sendWhatsAppMessage(from, "Un segundo que me pongo las pilas... 🧠");
-
-            const reply = await getGeminiResponseWithRetry(from, text);
+            const reply = await getGroqResponseWithRetry(from, text);
             await sendWhatsAppMessage(from, reply);
           } catch (err) {
             console.error("[ERROR] Procesando mensaje:", err.message || err);
             
-            // Si todo falló, al menos avisarle al usuario que no lo ignoraron
+            // FALLBACK si todo falla
             try {
               await sendWhatsAppMessage(
                 from,
@@ -172,74 +172,81 @@ async function handleIncomingMessage(req, res) {
 }
 
 // ============================================================
-// CONSULTA A GEMINI CON REINTENTOS (BACKOFF EXPONENCIAL)
+// CONSULTA A GROQ CON REINTENTOS
 // ============================================================
 
-async function getGeminiResponseWithRetry(phone, promptUsuario, attempt = 1) {
+async function getGroqResponseWithRetry(phone, promptUsuario) {
   const MAX_RETRIES = 3;
-  const BASE_DELAY_MS = 2000; // 2 segundos base
+  const BASE_DELAY_MS = 2000;
 
-  try {
-    return await getGeminiResponse(phone, promptUsuario);
-  } catch (err) {
-    const isRetryable = err.message?.includes("503") || 
-                        err.message?.includes("429") || 
-                        err.message?.includes("UNAVAILABLE") ||
-                        err.message?.includes("RATE_LIMIT_EXCEEDED");
+  let lastError = null;
 
-    if (isRetryable && attempt < MAX_RETRIES) {
-      const delay = BASE_DELAY_MS * Math.pow(2, attempt - 1); // 2s, 4s, 8s
-      console.log(`[RETRY] Intento ${attempt}/${MAX_RETRIES} falló. Esperando ${delay}ms...`);
-      await sleep(delay);
-      return getGeminiResponseWithRetry(phone, promptUsuario, attempt + 1);
+  for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
+    try {
+      console.log(`[RETRY] Intento ${attempt}/${MAX_RETRIES} para ${phone}`);
+      const result = await getGroqResponse(phone, promptUsuario);
+      console.log(`[RETRY] Éxito en intento ${attempt}`);
+      return result;
+    } catch (err) {
+      lastError = err;
+      const errorMessage = err.message || "";
+      const isRetryable = errorMessage.includes("429") || 
+                          errorMessage.includes("503") || 
+                          errorMessage.includes("rate limit") ||
+                          errorMessage.includes("high demand");
+
+      console.log(`[RETRY] Intento ${attempt} falló: ${errorMessage.substring(0, 100)}`);
+
+      if (!isRetryable || attempt === MAX_RETRIES) {
+        break;
+      }
+
+      const delay = BASE_DELAY_MS * Math.pow(2, attempt - 1);
+      console.log(`[RETRY] Esperando ${delay}ms antes del intento ${attempt + 1}...`);
+      await new Promise(resolve => setTimeout(resolve, delay));
     }
-
-    // Si no es reintentable o se acabaron los intentos, propagar el error
-    throw err;
   }
-}
 
-function sleep(ms) {
-  return new Promise(resolve => setTimeout(resolve, ms));
+  throw lastError;
 }
 
 // ============================================================
-// CONSULTA A GOOGLE GEMINI CON MEMORIA
+// CONSULTA A GROQ API (formato OpenAI-compatible)
 // ============================================================
 
-async function getGeminiResponse(phone, promptUsuario) {
-  const apiKey = (process.env.GEMINI_API_KEY || "").trim();
+async function getGroqResponse(phone, promptUsuario) {
+  const apiKey = (GROQ_API_KEY || "").trim();
 
   if (!apiKey) {
-    throw new Error("GEMINI_API_KEY no está configurada");
+    throw new Error("GROQ_API_KEY no está configurada");
   }
 
+  // Agregar mensaje del usuario al historial
   addToConversation(phone, "user", promptUsuario);
+
+  // Construir mensajes para Groq (formato OpenAI)
   const history = getConversation(phone);
   
-  const contents = history.map(msg => ({
-    role: msg.role,
-    parts: [{ text: msg.text }]
-  }));
+  const messages = [
+    { role: "system", content: SYSTEM_PROMPT },
+    ...history.map(msg => ({
+      role: msg.role === "model" ? "assistant" : msg.role,
+      content: msg.text
+    }))
+  ];
 
-  const url = `https://generativelanguage.googleapis.com/v1/models/gemini-3.5-flash:generateContent?key=${apiKey}`;
-
-  const response = await fetch(url, {
+  const response = await fetch(GROQ_API_URL, {
     method: "POST",
     headers: {
-      "Content-Type": "application/json"
+      "Content-Type": "application/json",
+      "Authorization": `Bearer ${apiKey}`
     },
     body: JSON.stringify({
-      systemInstruction: {
-        parts: [{ text: SYSTEM_PROMPT }]
-      },
-      contents: contents,
-      generationConfig: {
-        temperature: 0.6,
-        maxOutputTokens: 800,
-        topP: 0.9,
-        topK: 40
-      }
+      model: "llama-3.1-8b-instant",  // Modelo más rápido y con más cuota gratuita
+      messages: messages,
+      temperature: 0.6,
+      max_tokens: 800,
+      top_p: 0.9
     })
   });
 
@@ -250,13 +257,13 @@ async function getGeminiResponse(phone, promptUsuario) {
 
   const data = await response.json();
 
-  const reply =
-    data.candidates?.[0]?.content?.parts?.[0]?.text ||
+  const reply = data.choices?.[0]?.message?.content ||
     "Perdón, me quedé en blanco. ¿Me repetís eso?";
 
+  // Agregar respuesta del asistente al historial
   addToConversation(phone, "model", reply.trim());
 
-  console.log(`[GEMINI] Respuesta: "${reply.substring(0, 120)}..."`);
+  console.log(`[GROQ] Respuesta: "${reply.substring(0, 120)}..."`);
 
   return reply.trim();
 }
